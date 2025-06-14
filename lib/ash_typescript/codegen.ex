@@ -117,34 +117,22 @@ defmodule AshTypescript.Codegen do
   def generate_all_schemas_for_resource(resource, allowed_resources) do
     resource_name = resource |> Module.split() |> List.last()
 
-    attributes_schema = generate_attributes_schema(resource)
-    relationship_schema = generate_relationship_schema(resource, allowed_resources)
-    resource_schema = generate_resource_schema(resource)
+    resource_schema = generate_resource_schema(resource, allowed_resources)
 
     """
-    // #{resource_name} Schemas
-    #{attributes_schema}
-
-    #{relationship_schema}
-
+    // #{resource_name} Schema
     #{resource_schema}
     """
   end
 
-  def generate_attributes_schema(resource) do
+
+  def generate_resource_schema(resource, allowed_resources) do
     resource_name = resource |> Module.split() |> List.last()
 
-    attributes =
-      resource
-      |> Ash.Resource.Info.public_attributes()
-
-    calculations =
-      resource
-      |> Ash.Resource.Info.public_calculations()
-
-    aggregates =
-      resource
-      |> Ash.Resource.Info.public_aggregates()
+    # Get all fields (attributes, calculations, aggregates)
+    attributes = Ash.Resource.Info.public_attributes(resource)
+    calculations = Ash.Resource.Info.public_calculations(resource)
+    aggregates = Ash.Resource.Info.public_aggregates(resource)
 
     fields =
       Enum.concat([attributes, calculations, aggregates])
@@ -186,53 +174,8 @@ defmodule AshTypescript.Codegen do
             "  #{agg.name}: #{type};"
           end
       end)
-      |> Enum.join("\n")
 
-    """
-    type #{resource_name}FieldsSchema = {
-    #{fields}
-    };
-    """
-  end
-
-  def generate_relationship_schema(resource) do
-    resource_name = resource |> Module.split() |> List.last()
-
-    relationships =
-      resource
-      |> Ash.Resource.Info.public_relationships()
-      |> Enum.map(fn rel ->
-        related_resource_name = rel.destination |> Module.split() |> List.last()
-
-        case rel.type do
-          :belongs_to ->
-            "  #{rel.name}: #{related_resource_name}Relationship;"
-
-          :has_one ->
-            "  #{rel.name}: #{related_resource_name}Relationship;"
-
-          :has_many ->
-            "  #{rel.name}: #{related_resource_name}ArrayRelationship;"
-
-          :many_to_many ->
-            "  #{rel.name}: #{related_resource_name}ArrayRelationship;"
-        end
-      end)
-
-    if Enum.empty?(relationships) do
-      "type #{resource_name}RelationshipSchema = {};"
-    else
-      """
-      type #{resource_name}RelationshipSchema = {
-      #{Enum.join(relationships, "\n")}
-      };
-      """
-    end
-  end
-
-  def generate_relationship_schema(resource, allowed_resources) do
-    resource_name = resource |> Module.split() |> List.last()
-
+    # Get relationships
     relationships =
       resource
       |> Ash.Resource.Info.public_relationships()
@@ -245,37 +188,32 @@ defmodule AshTypescript.Codegen do
 
         case rel.type do
           :belongs_to ->
-            "  #{rel.name}: #{related_resource_name}Relationship;"
+            if rel.allow_nil? do
+              "  #{rel.name}?: #{related_resource_name} | null;"
+            else
+              "  #{rel.name}: #{related_resource_name};"
+            end
 
           :has_one ->
-            "  #{rel.name}: #{related_resource_name}Relationship;"
+            if rel.allow_nil? do
+              "  #{rel.name}?: #{related_resource_name} | null;"
+            else
+              "  #{rel.name}: #{related_resource_name};"
+            end
 
           :has_many ->
-            "  #{rel.name}: #{related_resource_name}ArrayRelationship;"
+            "  #{rel.name}: #{related_resource_name}[];"
 
           :many_to_many ->
-            "  #{rel.name}: #{related_resource_name}ArrayRelationship;"
+            "  #{rel.name}: #{related_resource_name}[];"
         end
       end)
 
-    if Enum.empty?(relationships) do
-      "type #{resource_name}RelationshipSchema = {};"
-    else
-      """
-      type #{resource_name}RelationshipSchema = {
-      #{Enum.join(relationships, "\n")}
-      };
-      """
-    end
-  end
-
-  def generate_resource_schema(resource) do
-    resource_name = resource |> Module.split() |> List.last()
+    all_fields = fields ++ relationships
 
     """
-    export type #{resource_name}ResourceSchema = {
-      fields: #{resource_name}FieldsSchema;
-      relationships: #{resource_name}RelationshipSchema;
+    export type #{resource_name} = {
+    #{Enum.join(all_fields, "\n")}
     };
     """
   end

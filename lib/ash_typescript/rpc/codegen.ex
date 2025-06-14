@@ -82,17 +82,16 @@ defmodule AshTypescript.Rpc.Codegen do
   defp generate_utility_types do
     """
     // Utility Types
-    type ResourceBase = {
-      fields: Record<string, any>;
-      relationships: Record<string, any>;
-    };
-
-    type FieldSelection<Resource extends ResourceBase> =
-      | keyof Resource["fields"]
+    type FieldSelection<Resource> =
+      | keyof Resource
       | {
-          [K in keyof Resource["relationships"]]?: FieldSelection<
-            Resource["relationships"][K] extends { __resource: infer R }
-            ? R extends ResourceBase ? R : never : never
+          [K in keyof Resource as Resource[K] extends any[] ? K : never]?: FieldSelection<
+            Resource[K] extends (infer Item)[] ? Item : never
+          >[];
+        }
+      | {
+          [K in keyof Resource as Resource[K] extends any[] ? never : K]?: FieldSelection<
+            Resource[K]
           >[];
         };
 
@@ -112,31 +111,29 @@ defmodule AshTypescript.Rpc.Codegen do
 
     // Infer picked fields from string field names
     type InferPickedFields<
-      Resource extends ResourceBase,
+      Resource,
       StringFields
-    > = Pick<Resource["fields"], Extract<StringFields, keyof Resource["fields"]>>
+    > = Pick<Resource, Extract<StringFields, keyof Resource>>
 
-    // Simplified relationship inference that works with literal arrays
+    // Simplified relationship inference
     type InferRelationships<
-      RelationshipsObject extends Record<string, any>,
-      AllRelationships extends Record<string, any>
+      Resource,
+      RelationshipsObject extends Record<string, any>
     > = {
-      [K in keyof RelationshipsObject]-?: K extends keyof AllRelationships
-        ? AllRelationships[K] extends { __resource: infer Res extends ResourceBase }
-          ? AllRelationships[K] extends { __array: true }
-            ? Array<InferResourceResult<Res, RelationshipsObject[K]>>
-            : InferResourceResult<Res, RelationshipsObject[K]>
-          : never
+      [K in keyof RelationshipsObject]-?: K extends keyof Resource
+        ? Resource[K] extends (infer Item)[]
+          ? Array<InferResourceResult<Item, RelationshipsObject[K]>>
+          : InferResourceResult<Resource[K], RelationshipsObject[K]>
         : never;
     };
 
     // Main result type that combines picked fields and relationships
     type InferResourceResult<
-      Resource extends ResourceBase,
+      Resource,
       SelectedFields extends FieldSelection<Resource>[]
     > =
       InferPickedFields<Resource, ExtractStringFields<SelectedFields>> &
-      InferRelationships<ExtractRelationshipObjects<SelectedFields>, Resource["relationships"]>;
+      InferRelationships<Resource, ExtractRelationshipObjects<SelectedFields>>;
     """
   end
 
@@ -145,14 +142,8 @@ defmodule AshTypescript.Rpc.Codegen do
          endpoint_process,
          endpoint_validate,
          otp_app,
-         resources
+         _resources
        ) do
-    # Generate relationship types for all resources
-    relationship_types =
-      resources
-      |> Enum.map(&generate_relationship_types(&1, resources))
-      |> Enum.join("\n\n")
-
     # Generate functions for each Rpc action
     rpc_functions =
       resources_and_actions
@@ -167,73 +158,9 @@ defmodule AshTypescript.Rpc.Codegen do
       )
       |> Enum.join("\n\n")
 
-    """
-    #{relationship_types}
-
-    #{rpc_functions}
-    """
+    rpc_functions
   end
 
-  defp generate_relationship_types(resource, all_resources) do
-    resource_name = resource |> Module.split() |> List.last()
-
-    has_single_relationship? =
-      all_resources
-      |> Enum.reject(&(&1 == resource))
-      |> Enum.any?(fn res ->
-        relationships = Ash.Resource.Info.public_relationships(res)
-
-        Enum.any?(
-          relationships,
-          &(&1.type in [:belongs_to, :has_one] and &1.destination == resource)
-        )
-      end)
-
-    # Generate single relationship type
-    single_rel =
-      if has_single_relationship? do
-        """
-          type #{resource_name}Relationship = {
-            __resource: #{resource_name}ResourceSchema;
-            fields: FieldSelection<#{resource_name}ResourceSchema>[];
-          };
-        """
-      else
-        ""
-      end
-
-    has_many_relationship? =
-      all_resources
-      |> Enum.reject(&(&1 == resource))
-      |> Enum.any?(fn res ->
-        relationships = Ash.Resource.Info.public_relationships(res)
-
-        Enum.any?(
-          relationships,
-          &(&1.type in [:has_many, :many_to_many] and &1.destination == resource)
-        )
-      end)
-
-    # Generate array relationship type
-    array_rel =
-      if has_many_relationship? do
-        """
-        type #{resource_name}ArrayRelationship = {
-          __array: true;
-          __resource: #{resource_name}ResourceSchema;
-          fields: FieldSelection<#{resource_name}ResourceSchema>[];
-        };
-        """
-      else
-        ""
-      end
-
-    if has_single_relationship? or has_many_relationship? do
-      Enum.join([single_rel, array_rel], "\n")
-    else
-      ""
-    end
-  end
 
   defp generate_rpc_function(
          {resource, action, rpc_action},
@@ -291,7 +218,7 @@ defmodule AshTypescript.Rpc.Codegen do
 
     # Base config fields
     fields_field = [
-      "  fields: FieldSelection<#{resource_name}ResourceSchema>[];"
+      "  fields: FieldSelection<#{resource_name}>[];"
     ]
 
     # Add input fields based on action type
@@ -422,19 +349,19 @@ defmodule AshTypescript.Rpc.Codegen do
       :read when action.get? ->
         """
         type Infer#{rpc_action_name_pascal}Result<Config extends #{rpc_action_name_pascal}Config> =
-          InferResourceResult<#{resource_name}ResourceSchema, Config["fields"]> | null;
+          InferResourceResult<#{resource_name}, Config["fields"]> | null;
         """
 
       :read ->
         """
         type Infer#{rpc_action_name_pascal}Result<Config extends #{rpc_action_name_pascal}Config> =
-          Array<InferResourceResult<#{resource_name}ResourceSchema, Config["fields"]>>;
+          Array<InferResourceResult<#{resource_name}, Config["fields"]>>;
         """
 
       action_type when action_type in [:create, :update] ->
         """
         type Infer#{rpc_action_name_pascal}Result<Config extends #{rpc_action_name_pascal}Config> =
-          InferResourceResult<#{resource_name}ResourceSchema, Config["fields"]>;
+          InferResourceResult<#{resource_name}, Config["fields"]>;
         """
 
       :destroy ->

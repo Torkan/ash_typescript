@@ -270,7 +270,7 @@ defmodule AshTypescript.Rpc do
         ]
 
         case action.type do
-          action when action in [:update, :destroy] ->
+          type when type in [:update, :destroy] ->
             case Ash.get(resource, params["primary_key"], opts) do
               {:ok, record} ->
                 result =
