@@ -118,8 +118,6 @@ defmodule AshTypescript.Codegen do
     resource_name = resource |> Module.split() |> List.last()
 
     attributes_schema = generate_attributes_schema(resource)
-    _calculated_fields_schema = generate_calculated_fields_schema(resource)
-    _aggregate_fields_schema = generate_aggregate_fields_schema(resource)
     relationship_schema = generate_relationship_schema(resource, allowed_resources)
     resource_schema = generate_resource_schema(resource)
 
@@ -195,72 +193,6 @@ defmodule AshTypescript.Codegen do
     #{fields}
     };
     """
-  end
-
-  def generate_calculated_fields_schema(resource) do
-    resource_name = resource |> Module.split() |> List.last()
-
-    calculations =
-      resource
-      |> Ash.Resource.Info.public_calculations()
-      |> Enum.map(fn calc ->
-        if calc.allow_nil? do
-          "  #{calc.name}?: #{get_ts_type(calc)} | null;"
-        else
-          "  #{calc.name}: #{get_ts_type(calc)};"
-        end
-      end)
-
-    if Enum.empty?(calculations) do
-      "type #{resource_name}CalculatedFieldsSchema = {};"
-    else
-      """
-      type #{resource_name}CalculatedFieldsSchema = {
-      #{Enum.join(calculations, "\n")}
-      };
-      """
-    end
-  end
-
-  def generate_aggregate_fields_schema(resource) do
-    resource_name = resource |> Module.split() |> List.last()
-
-    aggregates =
-      resource
-      |> Ash.Resource.Info.public_aggregates()
-      |> Enum.map(fn agg ->
-        type =
-          case agg.kind do
-            :sum ->
-              resource
-              |> lookup_aggregate_type(agg.relationship_path, agg.field)
-              |> get_ts_type()
-
-            :first ->
-              resource
-              |> lookup_aggregate_type(agg.relationship_path, agg.field)
-              |> get_ts_type()
-
-            _ ->
-              get_ts_type(agg.kind)
-          end
-
-        if agg.include_nil? do
-          "  #{agg.name}?: #{type} | null;"
-        else
-          "  #{agg.name}: #{type};"
-        end
-      end)
-
-    if Enum.empty?(aggregates) do
-      "type #{resource_name}AggregateFieldsSchema = {};"
-    else
-      """
-      type #{resource_name}AggregateFieldsSchema = {
-      #{Enum.join(aggregates, "\n")}
-      };
-      """
-    end
   end
 
   def generate_relationship_schema(resource) do
