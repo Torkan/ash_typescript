@@ -17,6 +17,7 @@ defmodule AshTypescript.MixProject do
       package: package(),
       deps: deps(),
       aliases: aliases(),
+      consolidate_protocols: Mix.env() == :prod,
       docs: &docs/0,
       description: @description,
       source_url: "https://github.com/ash-project/ash_typescript",

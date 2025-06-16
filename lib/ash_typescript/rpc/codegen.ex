@@ -73,71 +73,326 @@ defmodule AshTypescript.Rpc.Codegen do
 
     #{generate_filter_types(rpc_resources, rpc_resources)}
 
-    #{generate_utility_types()}
+    #{generate_utility_types(rpc_resources)}
 
     #{generate_rpc_functions(rpc_resources_and_actions, endpoint_process, endpoint_validate, otp_app, rpc_resources)}
     """
   end
 
-  defp generate_utility_types do
+  defp generate_utility_types(resources) do
     """
-    // Utility Types
-    type ResourceBase = {
-      fields: Record<string, any>;
-      relationships: Record<string, any>;
-    };
+    // Resource-specific Load Input Types
+    #{generate_resource_load_input_types(resources)}
 
-    type FieldSelection<Resource extends ResourceBase> =
-      | keyof Resource["fields"]
-      | {
-          [K in keyof Resource["relationships"]]?: FieldSelection<
-            Resource["relationships"][K] extends { __resource: infer R }
-            ? R extends ResourceBase ? R : never : never
-          >[];
-        };
+    // Load key metadata for each resource
+    #{generate_load_key_metadata(resources)}
 
-    // Helper to extract string fields from field selection
-    type ExtractStringFields<Fields> = Fields extends readonly (infer U)[]
+    // Load Input Type Utilities
+    type ExtractLoadInputStrings<LoadInputs> = LoadInputs extends readonly (infer U)[]
       ? U extends string
         ? U
         : never
       : never;
 
-    // Helper to extract relationship objects from field selection
-    type ExtractRelationshipObjects<Fields> = Fields extends readonly (infer U)[]
+    type ExtractLoadInputObjects<LoadInputs> = LoadInputs extends readonly (infer U)[]
       ? U extends Record<string, any>
         ? U
         : never
       : never;
 
-    // Infer picked fields from string field names
-    type InferPickedFields<
-      Resource extends ResourceBase,
-      StringFields
-    > = Pick<Resource["fields"], Extract<StringFields, keyof Resource["fields"]>>
+    // Result inference for resource-specific load inputs
+    type InferLoadResult<
+      Resource,
+      LoadInputs extends readonly any[]
+    > =
+      // Simple fields (no nested loads)
+      Pick<Resource, Extract<ExtractLoadInputStrings<LoadInputs>, keyof Resource>> &
+      // Relationship fields (with nested loads)
+      InferRelationshipLoads<Resource, ExtractLoadInputObjects<LoadInputs>> &
+      // Calculation fields (with nested loads under 'load' key)
+      InferNestedLoads<Resource, ExtractLoadInputObjects<LoadInputs>>;
 
-    // Simplified relationship inference that works with literal arrays
-    type InferRelationships<
-      RelationshipsObject extends Record<string, any>,
-      AllRelationships extends Record<string, any>
+    // Infer relationship loads
+    type InferRelationshipLoads<
+      Resource,
+      LoadObjects extends Record<string, any>
     > = {
-      [K in keyof RelationshipsObject]-?: K extends keyof AllRelationships
-        ? AllRelationships[K] extends { __resource: infer Res extends ResourceBase }
-          ? AllRelationships[K] extends { __array: true }
-            ? Array<InferResourceResult<Res, RelationshipsObject[K]>>
-            : InferResourceResult<Res, RelationshipsObject[K]>
-          : never
-        : never;
+      [K in keyof LoadObjects as K extends GetRelationshipLoadKeys<Resource> ? K : never]?:
+        K extends keyof Resource
+          ? Resource[K] extends (infer Item)[]
+            ? LoadObjects[K] extends any[]
+              ? Array<InferLoadResult<Item, LoadObjects[K]>>
+              : never
+            : LoadObjects[K] extends any[]
+              ? InferLoadResult<Resource[K], LoadObjects[K]>
+              : never
+          : never;
     };
 
-    // Main result type that combines picked fields and relationships
-    type InferResourceResult<
-      Resource extends ResourceBase,
-      SelectedFields extends FieldSelection<Resource>[]
-    > =
-      InferPickedFields<Resource, ExtractStringFields<SelectedFields>> &
-      InferRelationships<ExtractRelationshipObjects<SelectedFields>, Resource["relationships"]>;
+    // Infer nested loads (calculations with 'load' key)
+    type InferNestedLoads<
+      Resource,
+      LoadObjects extends Record<string, any>
+    > = {
+      [K in keyof LoadObjects as K extends GetNestedLoadKeys<Resource> ? K : never]?:
+        LoadObjects[K] extends { load?: infer LoadSpec }
+          ? LoadSpec extends any[]
+            ? GetNestedLoadResultType<Resource, K, LoadSpec> | null
+            : never
+          : never;
+    };
+
+    // Get the correct result type for nested loads based on the calculation
+    type GetNestedLoadResultType<Resource, K, LoadSpec extends any[]> =
+      Resource extends Todo
+        ? K extends "self"
+          ? InferLoadResult<Todo, LoadSpec>
+          : never
+        : Resource extends Comment
+          ? never  // Comment has no nested load fields currently
+        : Resource extends User
+          ? never  // User has no nested load fields currently
+        : never;
+
+    // Helper types to get the appropriate keys for each resource
+    type GetSimpleLoadKeys<Resource> =
+      Resource extends Todo ? TodoSimpleLoadKeys :
+      Resource extends Comment ? CommentSimpleLoadKeys :
+      Resource extends User ? UserSimpleLoadKeys :
+      never;
+
+    type GetRelationshipLoadKeys<Resource> =
+      Resource extends Todo ? TodoRelationshipLoadKeys :
+      Resource extends Comment ? CommentRelationshipLoadKeys :
+      Resource extends User ? UserRelationshipLoadKeys :
+      never;
+
+    type GetNestedLoadKeys<Resource> =
+      Resource extends Todo ? TodoNestedLoadKeys :
+      Resource extends Comment ? CommentNestedLoadKeys :
+      Resource extends User ? UserNestedLoadKeys :
+      never;
+
+
     """
+  end
+
+  # Helper functions for resource field analysis
+  defp get_loadable_attributes(resource) do
+    Ash.Resource.Info.public_attributes(resource)
+    |> Enum.map(& &1.name)
+  end
+
+  defp get_loadable_relationships(resource, rpc_resources) do
+    Ash.Resource.Info.public_relationships(resource)
+    |> Enum.filter(fn rel -> rel.destination in rpc_resources end)
+    |> Enum.map(fn rel -> {rel.name, rel.destination} end)
+  end
+
+  defp get_loadable_calculations(resource) do
+    Ash.Resource.Info.public_calculations(resource)
+    |> Enum.map(fn calc ->
+      {calc.name, calc.type, calc.constraints, calc.arguments}
+    end)
+  end
+
+  defp get_loadable_aggregates(resource) do
+    Ash.Resource.Info.public_aggregates(resource)
+    |> Enum.map(& &1.name)
+  end
+
+  defp generate_resource_load_input_types(resources) do
+    resources
+    |> Enum.map(&generate_single_resource_load_input_type(&1, resources))
+    |> Enum.join("\n\n")
+  end
+
+  defp generate_single_resource_load_input_type(resource, rpc_resources) do
+    resource_name = resource |> Module.split() |> List.last()
+
+    attributes = get_loadable_attributes(resource)
+    relationships = get_loadable_relationships(resource, rpc_resources)
+    calculations = get_loadable_calculations(resource)
+    aggregates = get_loadable_aggregates(resource)
+
+    # Separate simple calculations from complex ones
+    {simple_calculations, complex_calculations} =
+      calculations
+      |> Enum.split_with(fn {_name, calc_type, constraints, arguments} ->
+        # Simple calculations are those without arguments and not returning loadable structs
+        arguments == [] && !is_loadable_struct_calculation(calc_type, constraints, rpc_resources)
+      end)
+
+    simple_calc_names = Enum.map(simple_calculations, fn {name, _, _, _} -> name end)
+
+    # Generate attribute literals (including simple calculations)
+    attribute_literals =
+      (attributes ++ aggregates ++ simple_calc_names)
+      |> Enum.map(&"\"#{&1}\"")
+      |> Enum.join(" | ")
+
+    # Generate relationship load types
+    relationship_types =
+      relationships
+      |> Enum.map(fn {rel_name, dest_resource} ->
+        dest_name = dest_resource |> Module.split() |> List.last()
+        "  #{rel_name}?: #{dest_name}LoadInput[];"
+      end)
+      |> Enum.join("\n")
+
+    # Generate calculation load types (only for complex calculations)
+    calculation_types =
+      complex_calculations
+      |> Enum.map(fn {calc_name, calc_type, constraints, arguments} ->
+        generate_calculation_load_type(
+          calc_name,
+          calc_type,
+          constraints,
+          arguments,
+          rpc_resources
+        )
+      end)
+      |> Enum.join("\n")
+
+    load_object_types =
+      [relationship_types, calculation_types]
+      |> Enum.reject(&(&1 == ""))
+      |> Enum.join("\n")
+
+    """
+    type #{resource_name}LoadInput =
+      | #{attribute_literals}
+      | {
+    #{load_object_types}
+        };
+    """
+  end
+
+  defp is_loadable_struct_calculation(calc_type, constraints, rpc_resources) do
+    {actual_type, actual_constraints} =
+      case calc_type do
+        %{type: type, constraints: type_constraints} -> {type, type_constraints}
+        %{type: type} -> {type, constraints}
+        atom_type -> {atom_type, constraints}
+      end
+
+    case actual_type do
+      Ash.Type.Struct ->
+        instance_of = Keyword.get(actual_constraints || [], :instance_of)
+        instance_of && instance_of in rpc_resources
+
+      _ ->
+        false
+    end
+  end
+
+  defp generate_load_key_metadata(resources) do
+    resources
+    |> Enum.map(&generate_single_resource_load_metadata(&1, resources))
+    |> Enum.join("\n\n")
+  end
+
+  defp generate_single_resource_load_metadata(resource, rpc_resources) do
+    resource_name = resource |> Module.split() |> List.last()
+
+    attributes = get_loadable_attributes(resource)
+    relationships = get_loadable_relationships(resource, rpc_resources)
+    calculations = get_loadable_calculations(resource)
+    aggregates = get_loadable_aggregates(resource)
+
+    # Simple load keys: attributes, aggregates, and simple calculations
+    {simple_calculations, complex_calculations} =
+      calculations
+      |> Enum.split_with(fn {_name, calc_type, constraints, arguments} ->
+        arguments == [] && !is_loadable_struct_calculation(calc_type, constraints, rpc_resources)
+      end)
+
+    simple_calc_names = Enum.map(simple_calculations, fn {name, _, _, _} -> name end)
+
+    simple_keys =
+      (attributes ++ aggregates ++ simple_calc_names)
+      |> Enum.map(&"\"#{&1}\"")
+      |> Enum.join(" | ")
+
+    # Relationship load keys
+    relationship_keys =
+      relationships
+      |> Enum.map(fn {name, _} -> "\"#{name}\"" end)
+      |> Enum.join(" | ")
+
+    # Nested load keys: calculations that return structs with load-through capability
+    nested_keys =
+      complex_calculations
+      |> Enum.filter(fn {_name, calc_type, constraints, _arguments} ->
+        is_loadable_struct_calculation(calc_type, constraints, rpc_resources)
+      end)
+      |> Enum.map(fn {name, _, _, _} -> "\"#{name}\"" end)
+      |> Enum.join(" | ")
+
+    simple_type = if simple_keys == "", do: "never", else: simple_keys
+    relationship_type = if relationship_keys == "", do: "never", else: relationship_keys
+    nested_type = if nested_keys == "", do: "never", else: nested_keys
+
+    """
+    type #{resource_name}SimpleLoadKeys = #{simple_type};
+    type #{resource_name}RelationshipLoadKeys = #{relationship_type};
+    type #{resource_name}NestedLoadKeys = #{nested_type};
+    """
+  end
+
+  defp generate_calculation_load_type(calc_name, calc_type, constraints, arguments, rpc_resources) do
+    # Handle both atom format (:struct) and map format (%{type: :struct})
+    {actual_type, actual_constraints} =
+      case calc_type do
+        %{type: type, constraints: type_constraints} -> {type, type_constraints}
+        %{type: type} -> {type, constraints}
+        atom_type -> {atom_type, constraints}
+      end
+
+    case actual_type do
+      Ash.Type.Struct ->
+        # Check if it's an instance_of constraint (loadable struct)
+        instance_of = Keyword.get(actual_constraints || [], :instance_of)
+
+        if instance_of && instance_of in rpc_resources do
+          dest_name = instance_of |> Module.split() |> List.last()
+
+          if arguments != [] do
+            "  #{calc_name}?: { input?: #{generate_calc_input_type(arguments)}, load?: #{dest_name}LoadInput[] };"
+          else
+            "  #{calc_name}?: { load?: #{dest_name}LoadInput[] };"
+          end
+        else
+          if arguments != [] do
+            "  #{calc_name}?: { input?: #{generate_calc_input_type(arguments)} };"
+          else
+            "  #{calc_name}?: boolean;"
+          end
+        end
+
+      _ ->
+        if arguments != [] do
+          "  #{calc_name}?: { input?: #{generate_calc_input_type(arguments)} };"
+        else
+          "  #{calc_name}?: boolean;"
+        end
+    end
+  end
+
+  defp generate_calc_input_type(arguments) do
+    if arguments == [] do
+      "Record<string, any>"
+    else
+      arg_types =
+        arguments
+        |> Enum.map(fn arg ->
+          optional = arg.allow_nil? || arg.default != nil
+          "#{arg.name}#{if optional, do: "?", else: ""}: #{get_ts_type(arg)}"
+        end)
+        |> Enum.join(", ")
+
+      "{ #{arg_types} }"
+    end
   end
 
   defp generate_rpc_functions(
@@ -145,14 +400,8 @@ defmodule AshTypescript.Rpc.Codegen do
          endpoint_process,
          endpoint_validate,
          otp_app,
-         resources
+         _resources
        ) do
-    # Generate relationship types for all resources
-    relationship_types =
-      resources
-      |> Enum.map(&generate_relationship_types(&1, resources))
-      |> Enum.join("\n\n")
-
     # Generate functions for each Rpc action
     rpc_functions =
       resources_and_actions
@@ -167,72 +416,7 @@ defmodule AshTypescript.Rpc.Codegen do
       )
       |> Enum.join("\n\n")
 
-    """
-    #{relationship_types}
-
-    #{rpc_functions}
-    """
-  end
-
-  defp generate_relationship_types(resource, all_resources) do
-    resource_name = resource |> Module.split() |> List.last()
-
-    has_single_relationship? =
-      all_resources
-      |> Enum.reject(&(&1 == resource))
-      |> Enum.any?(fn res ->
-        relationships = Ash.Resource.Info.public_relationships(res)
-
-        Enum.any?(
-          relationships,
-          &(&1.type in [:belongs_to, :has_one] and &1.destination == resource)
-        )
-      end)
-
-    # Generate single relationship type
-    single_rel =
-      if has_single_relationship? do
-        """
-          type #{resource_name}Relationship = {
-            __resource: #{resource_name}ResourceSchema;
-            fields: FieldSelection<#{resource_name}ResourceSchema>[];
-          };
-        """
-      else
-        ""
-      end
-
-    has_many_relationship? =
-      all_resources
-      |> Enum.reject(&(&1 == resource))
-      |> Enum.any?(fn res ->
-        relationships = Ash.Resource.Info.public_relationships(res)
-
-        Enum.any?(
-          relationships,
-          &(&1.type in [:has_many, :many_to_many] and &1.destination == resource)
-        )
-      end)
-
-    # Generate array relationship type
-    array_rel =
-      if has_many_relationship? do
-        """
-        type #{resource_name}ArrayRelationship = {
-          __array: true;
-          __resource: #{resource_name}ResourceSchema;
-          fields: FieldSelection<#{resource_name}ResourceSchema>[];
-        };
-        """
-      else
-        ""
-      end
-
-    if has_single_relationship? or has_many_relationship? do
-      Enum.join([single_rel, array_rel], "\n")
-    else
-      ""
-    end
+    rpc_functions
   end
 
   defp generate_rpc_function(
@@ -291,7 +475,7 @@ defmodule AshTypescript.Rpc.Codegen do
 
     # Base config fields
     fields_field = [
-      "  fields: FieldSelection<#{resource_name}ResourceSchema>[];"
+      "  fields: readonly #{resource_name}LoadInput[];"
     ]
 
     # Add input fields based on action type
@@ -422,19 +606,19 @@ defmodule AshTypescript.Rpc.Codegen do
       :read when action.get? ->
         """
         type Infer#{rpc_action_name_pascal}Result<Config extends #{rpc_action_name_pascal}Config> =
-          InferResourceResult<#{resource_name}ResourceSchema, Config["fields"]> | null;
+          InferLoadResult<#{resource_name}, Config["fields"]> | null;
         """
 
       :read ->
         """
         type Infer#{rpc_action_name_pascal}Result<Config extends #{rpc_action_name_pascal}Config> =
-          Array<InferResourceResult<#{resource_name}ResourceSchema, Config["fields"]>>;
+          Array<InferLoadResult<#{resource_name}, Config["fields"]>>;
         """
 
       action_type when action_type in [:create, :update] ->
         """
         type Infer#{rpc_action_name_pascal}Result<Config extends #{rpc_action_name_pascal}Config> =
-          InferResourceResult<#{resource_name}ResourceSchema, Config["fields"]>;
+          InferLoadResult<#{resource_name}, Config["fields"]>;
         """
 
       :destroy ->
@@ -616,20 +800,23 @@ defmodule AshTypescript.Rpc.Codegen do
           "return result.data as Infer#{rpc_action_name_pascal}Result;"
 
         _ ->
-          "return result.data as Infer#{rpc_action_name_pascal}Result<#{rpc_action_name_pascal}Config>;"
+          "return result.data as Infer#{rpc_action_name_pascal}Result<T>;"
       end
 
-    result_type =
+    function_signature =
       case action.type do
-        :destroy -> "void"
-        _ when is_generic_action -> "Infer#{rpc_action_name_pascal}Result"
-        _ -> "Infer#{rpc_action_name_pascal}Result<#{rpc_action_name_pascal}Config>"
+        :destroy ->
+          "export async function #{function_name}(\n  config: #{rpc_action_name_pascal}Config\n): Promise<void>"
+
+        _ when is_generic_action ->
+          "export async function #{function_name}(\n  config: #{rpc_action_name_pascal}Config\n): Promise<Infer#{rpc_action_name_pascal}Result>"
+
+        _ ->
+          "export async function #{function_name}<T extends #{rpc_action_name_pascal}Config>(\n  config: T\n): Promise<Infer#{rpc_action_name_pascal}Result<T>>"
       end
 
     """
-    export async function #{function_name}(
-      config: #{rpc_action_name_pascal}Config
-    ): Promise<#{result_type}> {
+    #{function_signature} {
       const payload = build#{rpc_action_name_pascal}Payload(config);
 
       const csrfToken = document

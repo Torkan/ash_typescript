@@ -1,6 +1,5 @@
 defmodule AshTypescript.RpcTest do
   use ExUnit.Case, async: true
-  alias Ash.Filter.Runtime
   alias AshTypescript.Rpc
 
   setup do
@@ -542,24 +541,24 @@ defmodule AshTypescript.RpcTest do
       assert {:error, "Record not found"} = result
     end
 
-    test "returns error for read action validation", %{conn: conn} do
+    test "validates read actions successfully", %{conn: conn} do
       params = %{
         "action" => "list_todos",
         "input" => %{}
       }
 
       result = Rpc.validate_action(:ash_typescript, conn, params)
-      assert {:error, "Cannot validate a read action"} = result
+      assert %{success: true} = result
     end
 
-    test "returns error for generic action validation", %{conn: conn} do
+    test "validates generic actions successfully", %{conn: conn} do
       params = %{
         "action" => "get_statistics_todo",
         "input" => %{}
       }
 
       result = Rpc.validate_action(:ash_typescript, conn, params)
-      assert {:error, "Cannot validate a generic action"} = result
+      assert %{success: true} = result
     end
 
     test "returns error for non-existent action", %{conn: conn} do
@@ -943,21 +942,15 @@ defmodule AshTypescript.RpcTest do
       typescript_output = AshTypescript.Rpc.Codegen.generate_typescript_types(:ash_typescript)
 
       # Verify Todo resource types
-      assert String.contains?(typescript_output, "type TodoFieldsSchema")
-      assert String.contains?(typescript_output, "type TodoRelationshipSchema")
-      assert String.contains?(typescript_output, "export type TodoResourceSchema")
+      assert String.contains?(typescript_output, "export type Todo")
       assert String.contains?(typescript_output, "export type TodoFilterInput")
 
       # Verify Comment resource types
-      assert String.contains?(typescript_output, "type CommentFieldsSchema")
-      assert String.contains?(typescript_output, "type CommentRelationshipSchema")
-      assert String.contains?(typescript_output, "export type CommentResourceSchema")
+      assert String.contains?(typescript_output, "export type Comment")
       assert String.contains?(typescript_output, "export type CommentFilterInput")
 
       # Verify User resource types
-      assert String.contains?(typescript_output, "type UserFieldsSchema")
-      assert String.contains?(typescript_output, "type UserRelationshipSchema")
-      assert String.contains?(typescript_output, "export type UserResourceSchema")
+      assert String.contains?(typescript_output, "export type User")
       assert String.contains?(typescript_output, "export type UserFilterInput")
 
       # Verify specific Todo attributes are present
